@@ -13,3 +13,8 @@ STABLE_FRAMES = 4
 EXIT_TIMEOUT_SECONDS = 30
 # 실제 차량 통과 감지 장치가 없으므로 자동 출구 차단기 닫기 금지
 AUTO_CLOSE_EXIT_GATE = False
+# 실제 USB 카메라 영상 좌표는 조립 후 측정해 변경.
+BAY_ROIS = {1: (50, 100, 200, 350), 2: (230, 100, 380, 350), 3: (410, 100, 560, 350)}
+CAMERA_DIFF_THRESHOLD = 35
+CAMERA_AREA_RATIO = 0.25
+FINGERPRINT_MIN_CONFIDENCE = 50
