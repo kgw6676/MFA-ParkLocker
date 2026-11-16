@@ -1,42 +1,40 @@
 import time
-from gpiozero import AngularServo
 import config
-
-GATE_PINS = getattr(config, 'GATE_PINS', {
-    '입차': 17,   # GPIO 17 (물리 핀 11번)
-    '출차': 27,   # GPIO 27 (물리 핀 13번)
-})
 
 class Gate:
     def __init__(self, name, pin=None, open_angle=90, close_angle=0):
+        if name not in ('입구', '출구'):
+            raise ValueError('차단기 이름은 입구 또는 출구여야 합니다.')
         self.name = name
         self.is_open = False
         self.open_angle = open_angle
         self.close_angle = close_angle
-
-        target_pin = pin if pin is not None else GATE_PINS.get(name, 17)
-        # SG-90 표준 펄스 폭 (0.5ms ~ 2.5ms) 설정
-        self.servo = AngularServo(
-            target_pin,
-            min_angle=0,
-            max_angle=180,
-            min_pulse_width=0.0005,
-            max_pulse_width=0.0025
-        )
-        self.close()
+        self.servo = None
+        self.pin = pin if pin is not None else (config.ENTRY_SERVO_GPIO if name == '입구' else config.EXIT_SERVO_GPIO)
+        if not config.SIMULATION:
+            from gpiozero import AngularServo
+            self.servo = AngularServo(self.pin, min_angle=0, max_angle=180,
+                                      min_pulse_width=0.0005, max_pulse_width=0.0025,
+                                      initial_angle=None)
 
     def _move(self, angle):
-        self.servo.angle = angle
-        time.sleep(0.5)          # 차단기 암이 회전할 시간 확보
-        self.servo.value = None  # 떨림(Jitter) 및 발열 방지를 위해 PWM 신호 차단
+        if self.servo is not None:
+            self.servo.angle = angle
+            time.sleep(0.5)
+            self.servo.value = None
 
     def open(self):
         if not self.is_open:
             self._move(self.open_angle)
             self.is_open = True
-            print(f'{self.name} 차단기 열림')
+            print(f'{self.name} 차단기 열림' + (' (시뮬레이션)' if self.servo is None else ''))
 
     def close(self):
-        self._move(self.close_angle)
+        if self.is_open or self.servo is not None:
+            self._move(self.close_angle)
         self.is_open = False
-        print(f'{self.name} 차단기 닫힘')
+        print(f'{self.name} 차단기 닫힘' + (' (시뮬레이션)' if self.servo is None else ''))
+
+    def release(self):
+        if self.servo is not None:
+            self.servo.close()
