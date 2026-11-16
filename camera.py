@@ -1,93 +1,77 @@
-import cv2
-import numpy as np
 import config
-from config import NUM_BAYS, STABLE_FRAMES
-
-# config.py에 해당 변수가 없으면 기본값 사용
-USB_CAMERA_INDEX = getattr(config, 'USB_CAMERA_INDEX', 0)
-
-# 1, 2, 3번 주차칸의 화면상 좌표 (x1, y1, x2, y2) -> 실제 하드웨어 조립 후 캘리브레이션 필요
-BAY_ROIS = getattr(config, 'BAY_ROIS', {
-    1: (50, 100, 200, 350),
-    2: (230, 100, 380, 350),
-    3: (410, 100, 560, 350),
-})
 
 class Camera:
-    """USB 카메라 기반 주차칸 감지 인터페이스."""
     def __init__(self):
-        self.observations = {i: False for i in range(1, NUM_BAYS + 1)}
+        self.observations = {n: False for n in range(1, config.NUM_BAYS + 1)}
         self.stable = self.observations.copy()
-        self.counts = {i: 0 for i in self.observations}
-        
-        self.cap = cv2.VideoCapture(USB_CAMERA_INDEX)
-        self.baseline = None       # 차가 없을 때의 기준 화면(Grayscale)
-        self.diff_threshold = 35   # 픽셀 밝기 차이 임계값
-        self.area_ratio = 0.25     # ROI 면적의 25% 이상 변화 시 주차된 것으로 판정
+        self.counts = {n: 0 for n in self.observations}
+        self.baseline = None
+        self.cap = None
+        if not config.SIMULATION:
+            import cv2
+            self.cv2 = cv2
+            self.cap = cv2.VideoCapture(config.USB_CAMERA_INDEX)
+            if not self.cap.isOpened():
+                raise RuntimeError('USB 카메라를 열 수 없습니다.')
 
     def calibrate_empty(self):
-        """빈 주차장 상태를 기준 이미지로 저장 (초기화 시 1회 호출)."""
-        if not self.cap.isOpened():
-            return False
-        ret, frame = self.cap.read()
-        if ret:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            self.baseline = cv2.GaussianBlur(gray, (21, 21), 0)
+        """Call ONLY after visually confirming all parking bays are empty."""
+        if config.SIMULATION:
             return True
-        return False
+        ok, frame = self.cap.read()
+        if not ok:
+            raise RuntimeError('빈 주차장 기준 영상 촬영 실패')
+        gray = self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2GRAY)
+        self.baseline = self.cv2.GaussianBlur(gray, (21, 21), 0)
+        return True
 
     def predict(self):
-        # 카메라가 연결되지 않은 PC 환경 등에서는 기존 simulate() 값 유지
-        if not self.cap.isOpened():
+        if config.SIMULATION:
             return self.observations.copy()
-
-        ret, frame = self.cap.read()
-        if not ret:
-            return self.observations.copy()
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (21, 21), 0)
-
-        # 첫 프레임을 빈 주차장 기준으로 자동 설정
         if self.baseline is None:
-            self.baseline = blurred
-            return self.observations.copy()
-
-        frame_diff = cv2.absdiff(self.baseline, blurred)
-        _, thresh = cv2.threshold(frame_diff, self.diff_threshold, 255, cv2.THRESH_BINARY)
-
+            raise RuntimeError('빈 주차장 기준 영상이 없습니다. 빈 주차장 확인 후 calibrate_empty()를 실행하세요.')
+        ok, frame = self.cap.read()
+        if not ok:
+            raise RuntimeError('USB 카메라 프레임 읽기 실패')
+        cv2 = self.cv2
+        gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (21, 21), 0)
+        if gray.shape != self.baseline.shape:
+            raise RuntimeError('카메라 해상도가 기준 영상과 다릅니다.')
+        diff = cv2.absdiff(self.baseline, gray)
+        _, mask = cv2.threshold(diff, getattr(config, 'CAMERA_DIFF_THRESHOLD', 35), 255, cv2.THRESH_BINARY)
+        height, width = mask.shape
+        rois = getattr(config, 'BAY_ROIS', {1:(50,100,200,350),2:(230,100,380,350),3:(410,100,560,350)})
+        if set(rois) != set(self.observations):
+            raise ValueError('BAY_ROIS는 모든 주차칸을 포함해야 합니다.')
         result = {}
-        for bay_num, (x1, y1, x2, y2) in BAY_ROIS.items():
-            roi = thresh[y1:y2, x1:x2]
-            changed_pixels = cv2.countNonZero(roi)
-            total_pixels = (x2 - x1) * (y2 - y1)
-            occupied = (changed_pixels / total_pixels) > self.area_ratio
-            result[bay_num] = bool(occupied)  # 반드시 파이썬 기본 bool로 변환
-
-        self.observations = result
-        return self.observations.copy()
+        for number, (x1,y1,x2,y2) in rois.items():
+            if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+                raise ValueError(f'{number}번 칸 ROI가 영상 범위를 벗어났습니다.')
+            changed = cv2.countNonZero(mask[y1:y2,x1:x2])
+            result[number] = bool(changed / ((x2-x1)*(y2-y1)) > getattr(config, 'CAMERA_AREA_RATIO', 0.25))
+        return result
 
     def get_occupancy(self):
         current = self.predict()
-        if set(current) != set(self.stable):
-            raise ValueError('카메라 결과는 1~3번 모든 주차칸을 포함해야 합니다.')
-        for n, val in current.items():
-            if type(val) is not bool:
-                raise TypeError('주차칸 점유 결과는 bool이어야 합니다.')
-            if val == self.stable[n]:
-                self.counts[n] = 0
+        if set(current) != set(self.stable) or any(type(v) is not bool for v in current.values()):
+            raise ValueError('카메라 결과는 각 주차칸의 bool 점유 상태여야 합니다.')
+        for number, value in current.items():
+            if value == self.stable[number]:
+                self.counts[number] = 0
             else:
-                self.counts[n] += 1
-                if self.counts[n] >= STABLE_FRAMES:
-                    self.stable[n] = val
-                    self.counts[n] = 0
+                self.counts[number] += 1
+                if self.counts[number] >= config.STABLE_FRAMES:
+                    self.stable[number] = value
+                    self.counts[number] = 0
         return self.stable.copy()
 
     def simulate(self, number, occupied):
+        if not config.SIMULATION:
+            raise RuntimeError('실제 카메라 모드에서는 simulate()를 사용할 수 없습니다.')
         if number not in self.observations:
             raise ValueError('없는 주차칸입니다.')
         self.observations[number] = bool(occupied)
 
     def release(self):
-        if self.cap.isOpened():
+        if self.cap is not None:
             self.cap.release()
